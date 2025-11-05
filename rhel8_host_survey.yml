@@ -1,0 +1,36 @@
+# site.yml
+- name: RHEL 8 host survey via AAP
+  hosts: rhel8
+  gather_facts: no
+  become: yes
+
+  vars:
+    survey_path: /usr/local/sbin/rhel8_host_survey.sh
+
+  tasks:
+    - name: Install survey script
+      ansible.builtin.copy:
+        src: files/rhel8_host_survey.sh   # or use 'content: "{{ lookup(''file'',''rhel8_host_survey.sh'') }}"'
+        dest: "{{ survey_path }}"
+        mode: "0755"
+
+    - name: Run survey
+      ansible.builtin.shell: "{{ survey_path }}"
+      args:
+        executable: /bin/bash
+      register: survey_run
+      changed_when: false
+
+    - name: Show script output (includes OUTPUT_DIR path)
+      ansible.builtin.debug:
+        var: survey_run.stdout_lines
+
+    - name: Extract output directory path
+      ansible.builtin.set_fact:
+        survey_outdir: "{{ (survey_run.stdout | regex_search('OUTPUT_DIR=(.*)', '\\1')) | first }}"
+
+    - name: Fetch artifacts to controller workspace
+      ansible.builtin.fetch:
+        src: "{{ survey_outdir }}/"
+        dest: "./survey_artifacts/{{ inventory_hostname }}/"
+        flat: no
