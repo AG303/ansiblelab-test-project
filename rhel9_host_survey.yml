@@ -1,37 +1,66 @@
-- name: Ensure local destination base exists
-  ansible.builtin.file:
-    path: "./survey_artifacts_rhel9/{{ inventory_hostname }}"
-    state: directory
-    mode: "0755"
-  delegate_to: localhost
+- name: RHEL 9 host survey via AAP
+  hosts: all 
+  gather_facts: no
+  become: yes
 
-- name: Create tarball of survey output on remote
-  ansible.builtin.archive:
-    path: "{{ survey_outdir }}/"
-    dest: "/var/tmp/{{ inventory_hostname }}_survey_{{
-      ansible_date_time.epoch }}.tar.gz"
-    format: gz
-  register: survey_tar
+  vars:
+    survey_path: /usr/local/sbin/rhel9_host_survey.sh
 
-- name: Fetch tarball to controller
-  ansible.builtin.fetch:
-    src: "{{ survey_tar.dest }}"
-    dest: "./survey_artifacts_rhel9/{{ inventory_hostname }}/"
-    flat: yes
+  tasks:
+    - name: Install survey script
+      ansible.builtin.copy:
+        src: files/rhel9_host_survey.sh
+        dest: "{{ survey_path }}"
+        mode: "0755"
 
-- name: Unpack tarball locally (optional)
-  ansible.builtin.unarchive:
-    src: "./survey_artifacts_rhel9/{{ inventory_hostname }}/{{ survey_tar.dest | basename }}"
-    dest: "./survey_artifacts_rhel9/{{ inventory_hostname }}/"
-    remote_src: false
-  delegate_to: localhost
+    - name: Run survey
+      ansible.builtin.shell: "{{ survey_path }}"
+      args:
+        executable: /bin/bash
+      register: survey_run
+      changed_when: false
 
-- name: Clean up remote tarball (optional)
-  ansible.builtin.file:
-    path: "{{ survey_tar.dest }}"
-    state: absent
+    - name: Show script output (contains OUTPUT_DIR=...)
+      ansible.builtin.debug:
+        var: survey_run.stdout_lines
 
-- name: Clean up local tarball (optional)
-  ansible.builtin.file:
-    path: "./survey_artifacts_rhel9/{{ inventory_hostname }}/{{ survey_tar.dest | basename }}"
-    state: absent
+    - name: Extract output directory path
+      ansible.builtin.set_fact:
+        survey_outdir: "{{ (survey_run.stdout | regex_search('OUTPUT_DIR=(.*)', '\\1')) | first }}"
+
+    - name: Ensure local destination base exists
+      ansible.builtin.file:
+        path: "./survey_artifacts_rhel9/{{ inventory_hostname }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
+    - name: Create tarball of survey output on remote
+      ansible.builtin.archive:
+        path: "{{ survey_outdir }}/"
+        dest: "/var/tmp/{{ inventory_hostname }}_survey_{{ ansible_date_time.epoch }}.tar.gz"
+        format: gz
+      register: survey_tar
+
+    - name: Fetch tarball to controller
+      ansible.builtin.fetch:
+        src: "{{ survey_tar.dest }}"
+        dest: "./survey_artifacts_rhel9/{{ inventory_hostname }}/"
+        flat: yes
+
+    - name: Unpack tarball locally (optional)
+      ansible.builtin.unarchive:
+        src: "./survey_artifacts_rhel9/{{ inventory_hostname }}/{{ survey_tar.dest | basename }}"
+        dest: "./survey_artifacts_rhel9/{{ inventory_hostname }}/"
+        remote_src: false
+      delegate_to: localhost
+
+    - name: Clean up remote tarball (optional)
+      ansible.builtin.file:
+        path: "{{ survey_tar.dest }}"
+        state: absent
+
+    - name: Clean up local tarball (optional)
+      ansible.builtin.file:
+        path: "./survey_artifacts_rhel9/{{ inventory_hostname }}/{{ survey_tar.dest | basename }}"
+        state: absent
