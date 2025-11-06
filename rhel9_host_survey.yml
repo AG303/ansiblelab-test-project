@@ -52,14 +52,32 @@
       ansible.builtin.set_fact:
         survey_tar_path: "/var/tmp/{{ inventory_hostname }}_survey_{{ ts }}.tar.gz"
 
-    - name: Transfer tarball to ansible.ansiblelab.com host
-      ansible.builtin.copy:
-        src: "{{ survey_tar_path }}"
-        dest: "/var/tmp/{{ inventory_hostname }}_survey_{{ ts }}.tar.gz"
+    - name: Ensure /var/tmp exists on ansible.ansiblelab.com
+      ansible.builtin.file:
+        path: "/var/tmp"
+        state: directory
+        mode: "1777"
       delegate_to: ansible.ansiblelab.com
-      remote_src: true
+
+    - name: Fetch tarball to controller
+      ansible.builtin.fetch:
+        src: "{{ survey_tar_path }}"
+        dest: "./survey_artifacts_rhel9/{{ inventory_hostname }}/"
+        flat: yes
+
+    - name: Copy tarball from controller to ansible.ansiblelab.com
+      ansible.builtin.copy:
+        src: "./survey_artifacts_rhel9/{{ inventory_hostname }}/{{ survey_tar_path | basename }}"
+        dest: "/var/tmp/{{ inventory_hostname }}_survey_{{ ts }}.tar.gz"
+        mode: "0644"
+      delegate_to: ansible.ansiblelab.com
 
     - name: Clean up remote tarball (optional)
       ansible.builtin.file:
         path: "{{ survey_tar_path }}"
+        state: absent
+
+    - name: Clean up local tarball (optional)
+      ansible.builtin.file:
+        path: "./survey_artifacts_rhel9/{{ inventory_hostname }}/{{ survey_tar_path | basename }}"
         state: absent
