@@ -1,82 +1,119 @@
 #!/usr/bin/env python3
 """
-AAP 2.5 (Automation Controller) API example:
-- Auth via Bearer token (preferred) or username/password
-- GET /api/v2/ endpoints with pagination
-- List Job Templates
-- Launch a Job Template by name
-- Poll job status and fetch stdout
+AAP 2.5 (Automation Controller API v2) client – no external deps.
 
-Env vars:
+Auth:
+  - Preferred: Bearer token via env AAP_TOKEN
+  - Fallback: Basic auth via env AAP_USER + AAP_PASS
+
+Env:
   AAP_URL=https://ansible.ansiblelab.com
-  AAP_TOKEN=<6qVOc1SS42KQwT28QzsMRVz1rgvjES>   # preferred
-  AAP_USER=<username>                                  # fallback
-  AAP_PASS=<password>                                  # fallback
-  REQUESTS_CA_BUNDLE=/path/to/ca.pem                   # optional (or set verify=False below)
+  AAP_TOKEN=6qVOc1SS42KQwT28QzsMRVz1rgvjES           # or AAP_USER / AAP_PASS
+  AAP_CA_CERT=/path/ca.pem     # optional; if unset, default certs used
+  AAP_VERIFY=false             # optional; set to 'false' to skip TLS verify (NOT recommended)
 
 Usage:
-  python aap_example.py --list
-  python aap_example.py --launch "My Job Template" --extra-vars '{"target":"web"}'
+  python3 aap25_cli.py --ping
+  python3 aap25_cli.py --list
+  python3 aap25_cli.py --launch "My Job Template" --extra-vars '{"host_limit":"web"}'
 """
 
 import os
+import ssl
 import sys
-import time
 import json
+import time
+import base64
 import argparse
-import requests
-from urllib.parse import urljoin
+from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlencode
+from urllib.error import HTTPError, URLError
 
 DEFAULT_TIMEOUT = 30
 POLL_INTERVAL = 3
 
+def build_ssl_ctx():
+    verify_env = os.environ.get("AAP_VERIFY", "").lower()
+    ca_cert = os.environ.get("AAP_CA_CERT")
+    if verify_env == "false":
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    if ca_cert and os.path.isfile(ca_cert):
+        return ssl.create_default_context(cafile=ca_cert)
+    return ssl.create_default_context()
+
 class AAPClient:
-    def __init__(self, base_url, token=None, username=None, password=None, verify=False, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, base_url, token=None, username=None, password=None, timeout=DEFAULT_TIMEOUT, ssl_ctx=None):
+        if not base_url:
+            raise ValueError("AAP_URL is required")
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
-        self.verify = verify
-        self.s = requests.Session()
-        self.s.headers.update({"Content-Type": "application/json"})
+        self.ssl_ctx = ssl_ctx or build_ssl_ctx()
+        self.headers = {"Content-Type": "application/json"}
         if token:
-            self.s.headers.update({"Authorization": f"Bearer {token}"})
+            self.headers["Authorization"] = f"Bearer {token}"
         elif username and password:
-            self.s.auth = (username, password)
+            b = f"{username}:{password}".encode("utf-8")
+            self.headers["Authorization"] = "Basic " + base64.b64encode(b).decode("ascii")
         else:
             raise ValueError("Provide AAP_TOKEN or AAP_USER/AAP_PASS")
 
     def _url(self, path):
         if path.startswith("http"):
             return path
-        if path.startswith("/"):
-            path = path[1:]
+        path = path[1:] if path.startswith("/") else path
         return urljoin(self.base_url, path)
 
+    def _req(self, method, path, params=None, payload=None):
+        url = self._url(path)
+        if params:
+            # Only append if not already present
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}{urlencode(params)}"
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+        req = Request(url, data=data, method=method, headers=self.headers)
+        try:
+            with urlopen(req, timeout=self.timeout, context=self.ssl_ctx) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                raw = resp.read()
+                if "application/json" in content_type:
+                    return json.loads(raw.decode("utf-8") or "{}")
+                # Some endpoints (stdout txt) return text/plain
+                return raw.decode("utf-8", errors="replace")
+        except HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {e.code} {e.reason} for {url}\n{body}") from None
+        except URLError as e:
+            raise RuntimeError(f"Connection error for {url}: {e}") from None
+
     def get(self, path, params=None):
-        r = self.s.get(self._url(path), params=params, timeout=self.timeout, verify=self.verify)
-        r.raise_for_status()
-        return r.json()
+        return self._req("GET", path, params=params)
 
     def post(self, path, payload=None):
-        r = self.s.post(self._url(path), data=json.dumps(payload or {}), timeout=self.timeout, verify=self.verify)
-        r.raise_for_status()
-        return r.json()
+        return self._req("POST", path, payload=payload)
 
-    def paged_get(self, path, params=None):
-        """Iterate through paginated results under /api/v2/ (next links)."""
-        params = params or {}
-        url = self._url(path)
-        while url:
-            r = self.s.get(url, params=params, timeout=self.timeout, verify=self.verify)
-            r.raise_for_status()
-            data = r.json()
-            for res in data.get("results", []):
-                yield res
-            url = data.get("next")
-            params = None  # only pass params on first call
-
-    # Convenience helpers
+    # ---- API helpers ----
     def ping(self):
         return self.get("/api/v2/ping/")
+
+    def paged_get(self, path, params=None):
+        url = self._url(path)
+        q = dict(params or {})
+        while True:
+            resp = self.get(url.replace(self.base_url, "/"), params=q) if url.startswith(self.base_url) else self.get(url, params=q)
+            if not isinstance(resp, dict):
+                break
+            results = resp.get("results", [])
+            for r in results:
+                yield r
+            next_url = resp.get("next")
+            if not next_url:
+                break
+            url, q = next_url, None
 
     def list_job_templates(self, search=None):
         params = {"search": search} if search else None
@@ -88,53 +125,44 @@ class AAPClient:
                 return jt
         return None
 
-    def launch_job_template(self, jt_id, extra_vars=None, limit=None, inventory=None, credentials=None, tags=None, skip_tags=None, verbosity=None):
+    def launch_job_template(self, jt_id, *, extra_vars=None, limit=None, inventory=None, credentials=None, tags=None, skip_tags=None, verbosity=None):
         payload = {}
-        if extra_vars:
-            # extra_vars must be a dict; the API will JSON-encode it.
+        if extra_vars is not None:
+            if not isinstance(extra_vars, dict):
+                raise ValueError("--extra-vars must be JSON object")
             payload["extra_vars"] = extra_vars
-        if limit:
-            payload["limit"] = limit
-        if inventory:
-            payload["inventory"] = inventory
-        if credentials:
-            payload["credentials"] = credentials  # list of credential IDs
-        if tags:
-            payload["job_tags"] = tags
-        if skip_tags:
-            payload["skip_tags"] = skip_tags
+        if limit:       payload["limit"] = limit
+        if inventory:   payload["inventory"] = inventory
+        if credentials: payload["credentials"] = credentials
+        if tags:        payload["job_tags"] = tags
+        if skip_tags:   payload["skip_tags"] = skip_tags
         if verbosity is not None:
             payload["verbosity"] = verbosity
-
-        launch_url = f"/api/v2/job_templates/{jt_id}/launch/"
-        return self.post(launch_url, payload)
+        return self.post(f"/api/v2/job_templates/{jt_id}/launch/", payload=payload)
 
     def get_job(self, job_id):
         return self.get(f"/api/v2/jobs/{job_id}/")
 
     def get_job_stdout(self, job_id, fmt="txt"):
-        # txt, html, json, ansi
-        r = self.s.get(self._url(f"/api/v2/jobs/{job_id}/stdout/"), params={"format": fmt}, timeout=self.timeout, verify=self.verify)
-        r.raise_for_status()
-        return r.text
+        # fmt in {txt, html, json, ansi}
+        return self.get(f"/api/v2/jobs/{job_id}/stdout/", params={"format": fmt})
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Query AAP 2.5 (Automation Controller API v2)")
+    p = argparse.ArgumentParser(description="AAP 2.5 API client (no external deps)")
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--ping", action="store_true", help="Call /api/v2/ping/")
+    g.add_argument("--ping", action="store_true", help="GET /api/v2/ping/")
     g.add_argument("--list", action="store_true", help="List job templates")
     g.add_argument("--launch", metavar="JOB_TEMPLATE_NAME", help="Launch a job template by name")
 
-    p.add_argument("--search", help="Search filter for --list")
-    p.add_argument("--extra-vars", help="JSON string for extra_vars when launching")
-    p.add_argument("--limit", help="Host limit for a run (like CLI --limit)")
+    p.add_argument("--search", help="Filter for --list")
+    p.add_argument("--extra-vars", help="JSON string passed as extra_vars")
+    p.add_argument("--limit", help="Host limit (like ansible --limit)")
     p.add_argument("--inventory", type=int, help="Inventory ID override")
     p.add_argument("--credentials", help="Comma-separated credential IDs")
     p.add_argument("--tags", help="Comma-separated job tags")
-    p.add_argument("--skip-tags", help="Comma-separated job skip tags")
+    p.add_argument("--skip-tags", help="Comma-separated skip tags")
     p.add_argument("--verbosity", type=int, choices=range(0,6), help="Verbosity 0-5")
-    p.add_argument("--no-verify", action="store_true", help="Disable TLS verification (not recommended)")
-    p.add_argument("--no-follow", action="store_true", help="Do not follow job to completion")
+    p.add_argument("--no-follow", action="store_true", help="Do not wait for job completion")
     return p.parse_args()
 
 def main():
@@ -142,13 +170,12 @@ def main():
 
     base_url = os.environ.get("AAP_URL")
     token = os.environ.get("AAP_TOKEN")
-    user = os.environ.get("AAP_USER")
-    pwd = os.environ.get("AAP_PASS")
+    user  = os.environ.get("AAP_USER")
+    pwd   = os.environ.get("AAP_PASS")
     if not base_url:
-        sys.exit("Set AAP_URL (e.g., https://aap.example.com)")
+        sys.exit("Set AAP_URL (e.g., https://controller.example.com)")
 
-    verify = not args.no_verify
-    client = AAPClient(base_url=base_url, token=token, username=user, password=pwd, verify=verify)
+    client = AAPClient(base_url, token=token, username=user, password=pwd)
 
     if args.ping:
         print(json.dumps(client.ping(), indent=2))
@@ -160,7 +187,9 @@ def main():
             print("No job templates found.")
             return
         for jt in jts:
-            print(f"- [{jt['id']}] {jt['name']}  (project={jt.get('project', None)}, inventory={jt.get('inventory', None)})")
+            proj = jt.get("project")
+            inv  = jt.get("inventory")
+            print(f"- [{jt['id']}] {jt['name']}  (project={proj}, inventory={inv})")
         return
 
     if args.launch:
@@ -178,7 +207,7 @@ def main():
         creds = None
         if args.credentials:
             try:
-                creds = [int(c.strip()) for c in args.credentials.split(",") if c.strip()]
+                creds = [int(x.strip()) for x in args.credentials.split(",") if x.strip()]
             except ValueError:
                 sys.exit("--credentials must be comma-separated integers")
 
@@ -193,20 +222,21 @@ def main():
             verbosity=args.verbosity
         )
 
-        job_id = launch.get("job")
+        # Job or workflow job id
+        job_id = launch.get("job") or launch.get("id")
         if not job_id:
-            # Could be a workflow job; handle generically
-            job_id = launch.get("id")
-        print(f"Launched: job_id={job_id}")
+            print(json.dumps(launch, indent=2))
+            sys.exit("Launch returned no job id (is this a workflow?)")
 
-        if args.no_follow or not job_id:
+        print(f"Launched job_id={job_id}")
+
+        if args.no_follow:
             return
 
-        # Poll to completion
+        # Poll
         while True:
             job = client.get_job(job_id)
             status = job.get("status")
-            finished = job.get("finished")
             print(f"Status: {status}", flush=True)
             if status in {"successful", "failed", "error", "canceled"}:
                 break
@@ -214,7 +244,9 @@ def main():
 
         print("\n=== Job stdout ===")
         try:
-            print(client.get_job_stdout(job_id, fmt="txt"))
+            out = client.get_job_stdout(job_id, fmt="txt")
+            sys.stdout.write(out if isinstance(out, str) else json.dumps(out, indent=2))
+            sys.stdout.write("\n")
         except Exception as e:
             print(f"(could not fetch stdout: {e})")
 
