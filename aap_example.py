@@ -8,8 +8,8 @@ AAP 2.5 (Automation Controller) API example:
 - Poll job status and fetch stdout
 
 Env vars:
-  AAP_URL=https://aap.example.com
-  AAP_TOKEN=<controller OAuth/personal access token>   # preferred
+  AAP_URL=https://ansible.ansiblelab.com
+  AAP_TOKEN=<6qVOc1SS42KQwT28QzsMRVz1rgvjES>   # preferred
   AAP_USER=<username>                                  # fallback
   AAP_PASS=<password>                                  # fallback
   REQUESTS_CA_BUNDLE=/path/to/ca.pem                   # optional (or set verify=False below)
@@ -31,7 +31,7 @@ DEFAULT_TIMEOUT = 30
 POLL_INTERVAL = 3
 
 class AAPClient:
-    def __init__(self, base_url, token=None, username=None, password=None, verify=True, timeout=DEFAULT_TIMEOUT):
+    def __init__(self, base_url, token=None, username=None, password=None, verify=False, timeout=DEFAULT_TIMEOUT):
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
         self.verify = verify
