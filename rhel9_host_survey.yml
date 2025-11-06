@@ -1,6 +1,6 @@
 # site_rhel9.yml
 - name: RHEL 9 host survey via AAP
-  hosts: rhel9
+  hosts: all 
   gather_facts: no
   become: yes
 
