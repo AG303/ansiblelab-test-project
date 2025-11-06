@@ -1,4 +1,3 @@
-# site_rhel9.yml
 - name: RHEL 9 host survey via AAP
   hosts: all 
   gather_facts: no
@@ -29,8 +28,9 @@
       ansible.builtin.set_fact:
         survey_outdir: "{{ (survey_run.stdout | regex_search('OUTPUT_DIR=(.*)', '\\1')) | first }}"
 
-    - name: Fetch artifacts to controller workspace
-      ansible.builtin.fetch:
+    - name: Fetch artifacts directory using synchronize
+      ansible.posix.synchronize:
         src: "{{ survey_outdir }}/"
         dest: "./survey_artifacts_rhel9/{{ inventory_hostname }}/"
-        flat: no
+        mode: pull
+       
