@@ -1,0 +1,129 @@
+---
+# Ansible playbook: discover running ECS tasks & ECS container instances, and EKS pods (containers)
+# Requirements: aws CLI and kubectl installed and configured; AWS credentials accessible to the runner.
+
+- name: Discover running ECS tasks and EKS pods
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ecs_running_tasks: []
+    ecs_container_instances: []
+    eks_pods: []
+  tasks:
+
+    - name: Ensure aws CLI is available
+      command: aws --version
+      register: aws_cli_check
+      changed_when: false
+
+    - name: List ECS clusters
+      command: aws ecs list-clusters --output json
+      register: ecs_clusters_raw
+      changed_when: false
+
+    - name: Parse ECS cluster ARNs
+      set_fact:
+        ecs_clusters: "{{ ecs_clusters_raw.stdout | from_json | json_query('clusterArns') | default([]) }}"
+
+    - name: Gather running tasks for each ECS cluster
+      vars:
+        cluster: "{{ item }}"
+      loop: "{{ ecs_clusters }}"
+      loop_control:
+        label: "{{ item | regex_replace('^.*/','') }}"
+      block:
+        - name: List running tasks in cluster {{ cluster }}
+          command: >
+            aws ecs list-tasks --cluster "{{ cluster }}" --desired-status RUNNING --output json
+          register: list_tasks
+          changed_when: false
+
+        - name: Describe running tasks (if any) in cluster {{ cluster }}
+          when: (list_tasks.stdout | from_json).taskArns | length > 0
+          command: >
+            aws ecs describe-tasks --cluster "{{ cluster }}" --tasks {{ (list_tasks.stdout | from_json).taskArns | join(' ') }} --output json
+          register: described_tasks
+          changed_when: false
+
+        - name: Append described tasks to ecs_running_tasks
+          when: described_tasks is defined and described_tasks.stdout | length > 0
+          set_fact:
+            ecs_running_tasks: "{{ ecs_running_tasks + ((described_tasks.stdout | from_json).tasks | default([])) }}"
+
+    - name: Gather ECS container instances (EC2-backed) for each ECS cluster
+      vars:
+        cluster: "{{ item }}"
+      loop: "{{ ecs_clusters }}"
+      loop_control:
+        label: "{{ item | regex_replace('^.*/','') }}"
+      block:
+        - name: List container instance ARNs in cluster {{ cluster }}
+          command: aws ecs list-container-instances --cluster "{{ cluster }}" --output json
+          register: list_container_instances
+          changed_when: false
+
+        - name: Describe container instances to get EC2 instance IDs (if any)
+          when: (list_container_instances.stdout | from_json).containerInstanceArns | length > 0
+          command: >
+            aws ecs describe-container-instances --cluster "{{ cluster }}" --container-instances {{ (list_container_instances.stdout | from_json).containerInstanceArns | join(' ') }} --output json
+          register: described_container_instances
+          changed_when: false
+
+        - name: Append container instance info to ecs_container_instances
+          when: described_container_instances is defined and described_container_instances.stdout | length > 0
+          set_fact:
+            ecs_container_instances: "{{ ecs_container_instances + ((described_container_instances.stdout | from_json).containerInstances | default([])) }}"
+
+    - name: List EKS clusters
+      command: aws eks list-clusters --output json
+      register: eks_clusters_raw
+      changed_when: false
+
+    - name: Parse EKS cluster names
+      set_fact:
+        eks_clusters: "{{ eks_clusters_raw.stdout | from_json | json_query('clusters') | default([]) }}"
+
+    - name: For each EKS cluster update kubeconfig and list pods
+      vars:
+        cluster: "{{ item }}"
+      loop: "{{ eks_clusters }}"
+      loop_control:
+        label: "{{ item }}"
+      block:
+        - name: Update kubeconfig for EKS cluster {{ cluster }}
+          command: aws eks update-kubeconfig --name "{{ cluster }}"
+          register: kubeconfig_update
+          changed_when: false
+
+        - name: List all pods in cluster {{ cluster }} (requires kubectl)
+          command: kubectl get pods --all-namespaces -o json
+          register: kubectl_pods
+          changed_when: false
+          failed_when: false
+
+        - name: Append pods to eks_pods
+          when: kubectl_pods.stdout is defined and kubectl_pods.stdout | length > 0
+          set_fact:
+            eks_pods: "{{ eks_pods + ((kubectl_pods.stdout | from_json).items | default([])) }}"
+
+    - name: Summary - count results
+      debug:
+        msg:
+          - "ECS clusters found: {{ ecs_clusters | length }}"
+          - "Total running ECS tasks discovered: {{ ecs_running_tasks | length }}"
+          - "Total ECS container instances discovered: {{ ecs_container_instances | length }}"
+          - "EKS clusters found: {{ eks_clusters | length }}"
+          - "Total EKS pods discovered: {{ eks_pods | length }}"
+
+    - name: Show sample ECS running tasks (first 20)
+      debug:
+        var: ecs_running_tasks[:20]
+
+    - name: Show sample ECS container instances (first 20)
+      debug:
+        var: ecs_container_instances[:20]
+
+    - name: Show sample EKS pods (first 20)
+      debug:
+        var: eks_pods[:20]
